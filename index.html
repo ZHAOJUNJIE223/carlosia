@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>卡罗西亚大陆</title>
-    <link rel="stylesheet" href="./styles.css?v=20261114b" />
+    <link rel="stylesheet" href="./styles.css?v=20261114c" />
   </head>
   <body>
     <!-- 老师登录界面 -->
@@ -12,8 +12,36 @@
       <div class="login-card">
         <div class="login-logo">🌟</div>
         <h1 class="login-title">卡罗西亚大陆</h1>
-        <p class="login-subtitle">课堂养成游戏 · 老师入口</p>
-        <form id="loginForm" class="login-form">
+        <p class="login-subtitle">课堂养成游戏</p>
+
+        <div class="login-tabs">
+          <button type="button" class="login-tab is-active" data-login-mode="student">学生登录</button>
+          <button type="button" class="login-tab" data-login-mode="teacher">老师入口</button>
+        </div>
+
+        <form id="studentLoginForm" class="login-form">
+          <input
+            id="studentName"
+            type="text"
+            maxlength="12"
+            autocomplete="off"
+            placeholder="你的名字（和老师约好的那个）"
+            required
+          />
+          <input
+            id="studentPass"
+            type="text"
+            inputmode="numeric"
+            maxlength="4"
+            autocomplete="off"
+            placeholder="4 位数字密码"
+            required
+          />
+          <button type="submit" class="login-button" id="studentLoginBtn">开始游戏</button>
+        </form>
+        <p id="studentLoginError" class="login-error" hidden>登录信息有误，请重试</p>
+
+        <form id="loginForm" class="login-form" hidden>
           <input
             id="teacherCode"
             type="password"
@@ -21,7 +49,7 @@
             autocomplete="off"
             required
           />
-          <button type="submit" class="login-button">进入游戏</button>
+          <button type="submit" class="login-button">进入老师后台</button>
         </form>
         <p id="loginError" class="login-error" hidden>权限码错误，请重试</p>
       </div>
@@ -481,8 +509,8 @@
       </div>
     </div>
 
-    <script src="./data/petConfig.js?v=20261114b"></script>
-    <script src="./app.js?v=20261114b"></script>
+    <script src="./data/petConfig.js?v=20261114c"></script>
+    <script src="./app.js?v=20261114c"></script>
 
   <!-- 新手引导系统 -->
   <div id="guideOverlay" class="guide-overlay" hidden>
