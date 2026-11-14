@@ -23,6 +23,8 @@
   let cloudSyncTimer = null;
   let cloudSyncBusy = false;
   let cloudSyncQueued = null;
+  // 只有学生登录、或线上老师登录时才把进度写回云端；本地离线模式不动云端
+  let cloudSyncAllowed = false;
 
   function cloudHeaders(extra) {
     return Object.assign(
@@ -93,7 +95,7 @@
 
   // 只同步"当前选中的这个角色"，合并写请求，避免连点探索时刷爆接口
   function scheduleCloudSync(profile) {
-    if (!CLOUD_ENABLED || !profile || !profile.name) {
+    if (!CLOUD_ENABLED || !cloudSyncAllowed || !profile || !profile.name) {
       return;
     }
     const payload = {
@@ -802,9 +804,11 @@
     }
     teacherUnlocked = true;
     els.loginError.hidden = true;
-    // 老师端连云端时用独立的存档键，原来的本地全班存档保持不动
-    activeStorageKey = CLOUD_ENABLED ? `${STORAGE_KEY}_cloud_teacher` : STORAGE_KEY;
-    if (CLOUD_ENABLED) {
+    // 本地双击打开（老师离线备课 / 线下课）保持纯本地存档；线上才拉云端全班
+    const useCloudTeacher = CLOUD_ENABLED && location.protocol !== "file:";
+    activeStorageKey = useCloudTeacher ? `${STORAGE_KEY}_cloud_teacher` : STORAGE_KEY;
+    cloudSyncAllowed = useCloudTeacher;
+    if (useCloudTeacher) {
       setSaveStatus("正在读取全班数据");
       try {
         const rows = await cloudGetAllStudents();
@@ -866,6 +870,7 @@
       state.selectedId = profile.id;
       // 学生端用独立缓存键，不碰老师电脑上的全班存档
       activeStorageKey = `${STORAGE_KEY}_cloud_${name}`;
+      cloudSyncAllowed = true;
       // 已自动建档，引导从第 2 步开始，不再提示"创建角色"
       guideStartIndex = 1;
       normalizeState();
