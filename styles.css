@@ -2546,6 +2546,34 @@ button:focus-visible {
   margin: 0 0 24px;
 }
 
+.login-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  background: #f2ece2;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+
+.login-tab {
+  flex: 1;
+  padding: 9px 6px;
+  border: none;
+  background: transparent;
+  border-radius: 9px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #6c6358;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+}
+
+.login-tab.is-active {
+  background: #fffdfa;
+  color: #2b2620;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
 .login-form {
   display: flex;
   flex-direction: column;
