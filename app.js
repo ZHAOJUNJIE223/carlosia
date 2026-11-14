@@ -1198,7 +1198,7 @@
       minute: "2-digit",
       second: "2-digit",
     });
-    els.saveStatus.textContent = `${message} ${time}`;
+    els.saveStatus.textContent = `${message || "已保存"} ${time}`;
   }
 
   // ===== 市场数据读写 =====
@@ -4226,7 +4226,7 @@
     const profile = getActiveProfile();
     if (profile) {
       profile.guideCompleted = true;
-      saveState();
+      saveState("引导已跳过");
     }
   }
 
