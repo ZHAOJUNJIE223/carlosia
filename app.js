@@ -12,6 +12,128 @@
   const PET_UPGRADE_HP_GAIN = 10;
   const COMPENSATION_ACTION_POINTS = 2;
 
+  // ===== 云端存档（Supabase）=====
+  // 部署到公网后，学生各自在自己电脑登录；两项留空则退回纯本地存档模式
+  const CLOUD_CONFIG = {
+    url: "https://rhfhtgjpnzasrlkcfdim.supabase.co",
+    key: "sb_publishable__dL04pGC3ZNvK8tsIfixvQ_l6p5FOMC",
+  };
+  const CLOUD_ENABLED = Boolean(CLOUD_CONFIG.url && CLOUD_CONFIG.key);
+  const CLOUD_TABLE = "students";
+  let cloudSyncTimer = null;
+  let cloudSyncBusy = false;
+  let cloudSyncQueued = null;
+
+  function cloudHeaders(extra) {
+    return Object.assign(
+      {
+        apikey: CLOUD_CONFIG.key,
+        Authorization: `Bearer ${CLOUD_CONFIG.key}`,
+        "Content-Type": "application/json",
+      },
+      extra || {}
+    );
+  }
+
+  async function cloudRequest(path, options) {
+    const opts = options || {};
+    const res = await fetch(`${CLOUD_CONFIG.url}/rest/v1/${path}`, {
+      method: opts.method || "GET",
+      headers: cloudHeaders(opts.headers),
+      body: opts.body,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    if (!text) {
+      return null;
+    }
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function cloudGetStudent(name) {
+    const path = `${CLOUD_TABLE}?name=eq.${encodeURIComponent(
+      name
+    )}&select=name,pass,save,updated_at`;
+    return cloudRequest(path).then((rows) => (rows && rows.length ? rows[0] : null));
+  }
+
+  function cloudGetAllStudents() {
+    return cloudRequest(`${CLOUD_TABLE}?select=name,pass,save,updated_at&order=updated_at.desc`);
+  }
+
+  function cloudUpsertStudent(name, pass, save) {
+    return cloudRequest(`${CLOUD_TABLE}?on_conflict=name`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        name,
+        pass,
+        save,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+  }
+
+  // 把云端返回的一行还原成角色对象
+  function profileFromCloud(row) {
+    const raw = row && row.save && typeof row.save === "object" ? row.save : {};
+    const profile = Object.assign({}, raw);
+    profile.id =
+      profile.id || `role_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    profile.name = profile.name || (row && row.name) || "无名训练家";
+    profile.pass = (row && row.pass) || profile.pass || "";
+    return profile;
+  }
+
+  // 只同步"当前选中的这个角色"，合并写请求，避免连点探索时刷爆接口
+  function scheduleCloudSync(profile) {
+    if (!CLOUD_ENABLED || !profile || !profile.name) {
+      return;
+    }
+    const payload = {
+      name: profile.name,
+      pass: String(profile.pass || "").slice(0, 12),
+      save: profile,
+    };
+    cloudSyncQueued = payload;
+    if (cloudSyncTimer) {
+      clearTimeout(cloudSyncTimer);
+    }
+    cloudSyncTimer = setTimeout(() => {
+      flushCloudSync();
+    }, 2000);
+  }
+
+  async function flushCloudSync() {
+    if (!cloudSyncQueued || cloudSyncBusy) {
+      return;
+    }
+    const payload = cloudSyncQueued;
+    cloudSyncQueued = null;
+    cloudSyncBusy = true;
+    try {
+      await cloudUpsertStudent(payload.name, payload.pass, payload.save);
+      setSaveStatus("已同步云端");
+    } catch (err) {
+      console.warn("云端同步失败", err);
+      setSaveStatus("云端同步失败（已存本地）");
+      // 留一次重试机会：把这条重新排队
+      if (!cloudSyncQueued) {
+        cloudSyncQueued = payload;
+        cloudSyncTimer = setTimeout(flushCloudSync, 6000);
+      }
+    } finally {
+      cloudSyncBusy = false;
+    }
+  }
+
+
   // 宠物战斗属性基础值
   const PET_BASE_ATTACK = 10;
   const PET_BASE_DEFENSE = 8;
@@ -612,8 +734,11 @@
   let timerSeconds = TIMER_DURATION; // 计时器剩余秒数
   let timerStarted = false; // 计时器是否已启动过（启动后不能再加时间）
   let currentGuideStep = 0; // 当前引导步骤
+  let guideStartIndex = 0; // 引导起始步骤（学生端已自动建档，跳过"创建角色"这一步）
   let captureTarget = null; // 当前捕捉目标野生宠物
   let lastToastTime = {}; // 记录上次提示时间，避免重复提示
+  // 本地存档键：老师端用全班存档，学生登录后切到自己的独立缓存，避免互相覆盖
+  let activeStorageKey = STORAGE_KEY;
 
   document.addEventListener("DOMContentLoaded", init);
 
@@ -651,20 +776,154 @@
     if (els.loginView) {
       els.loginView.classList.remove("hidden");
     }
+    // 本地双击打开（老师备课）默认进老师入口；线上默认学生登录
+    if (location.protocol === "file:") {
+      const loginModeButtons = document.querySelectorAll("[data-login-mode]");
+      loginModeButtons.forEach((btn) => {
+        btn.classList.toggle("is-active", btn.dataset.loginMode === "teacher");
+      });
+      if (els.loginForm) {
+        els.loginForm.hidden = false;
+      }
+      if (els.studentLoginForm) {
+        els.studentLoginForm.hidden = true;
+      }
+    }
   }
 
-  function handleLogin(event) {
+  // 老师登录：进后台，并把云端全班数据拉下来（拉不到就继续用本地）
+  async function handleLogin(event) {
     event.preventDefault();
     const code = els.teacherCode.value.trim();
-    if (code === TEACHER_KEY) {
-      teacherUnlocked = true;
-      els.loginView.classList.add("hidden");
-      els.loginError.hidden = true;
-      render();
-    } else {
+    if (code !== TEACHER_KEY) {
       els.loginError.hidden = false;
       els.teacherCode.value = "";
+      return;
     }
+    teacherUnlocked = true;
+    els.loginError.hidden = true;
+    // 老师端连云端时用独立的存档键，原来的本地全班存档保持不动
+    activeStorageKey = CLOUD_ENABLED ? `${STORAGE_KEY}_cloud_teacher` : STORAGE_KEY;
+    if (CLOUD_ENABLED) {
+      setSaveStatus("正在读取全班数据");
+      try {
+        const rows = await cloudGetAllStudents();
+        if (rows && rows.length) {
+          const merged = rows.map(profileFromCloud);
+          state.profiles = merged;
+          state.selectedId = merged[0].id;
+          normalizeState();
+          pendingEvolution = null;
+          setSaveStatus(`全班数据已加载（${merged.length} 人）`);
+        }
+      } catch (err) {
+        console.warn("读取云端名单失败", err);
+        setSaveStatus("云端读取失败（沿用本地存档）");
+      }
+    }
+    els.loginView.classList.add("hidden");
+    // 老师端恢复"角色存档"面板
+    const teacherPanel = document.querySelector(".profile-panel");
+    if (teacherPanel) {
+      teacherPanel.hidden = false;
+    }
+    render();
+  }
+
+  // 学生登录：按名字查云端存档，查不到就自动建一个新档
+  async function handleStudentLogin(event) {
+    event.preventDefault();
+    if (!CLOUD_ENABLED) {
+      showStudentError("云端未配置，暂时只能本地玩");
+      return;
+    }
+    const name = (els.studentName.value || "").trim().slice(0, 12);
+    const pass = (els.studentPass.value || "").trim();
+    if (!name) {
+      showStudentError("请先填写名字");
+      return;
+    }
+    if (!/^\d{4}$/.test(pass)) {
+      showStudentError("密码要是 4 位数字");
+      return;
+    }
+    showStudentError("");
+    els.studentLoginBtn.disabled = true;
+    const oldLabel = els.studentLoginBtn.textContent;
+    els.studentLoginBtn.textContent = "正在连接…";
+    try {
+      let row = await cloudGetStudent(name);
+      if (!row) {
+        const profile = buildNewProfile(name, pass);
+        await cloudUpsertStudent(name, pass, profile);
+        row = { name, pass, save: profile };
+      } else if (String(row.pass || "").trim() !== pass) {
+        showStudentError("密码不对，再试一次");
+        return;
+      }
+      const profile = profileFromCloud(row);
+      state.profiles = [profile];
+      state.selectedId = profile.id;
+      // 学生端用独立缓存键，不碰老师电脑上的全班存档
+      activeStorageKey = `${STORAGE_KEY}_cloud_${name}`;
+      // 已自动建档，引导从第 2 步开始，不再提示"创建角色"
+      guideStartIndex = 1;
+      normalizeState();
+      pendingEvolution = null;
+      try {
+        localStorage.setItem(activeStorageKey, JSON.stringify(state));
+      } catch (err) {
+        console.warn("写本地缓存失败", err);
+      }
+      els.loginView.classList.add("hidden");
+      setSaveStatus("云端存档已加载");
+      // 学生端只有一个角色，隐藏"角色存档/新建角色"面板
+      const studentPanel = document.querySelector(".profile-panel");
+      if (studentPanel) {
+        studentPanel.hidden = true;
+      }
+      render();
+    } catch (err) {
+      console.error("学生登录失败", err);
+      showStudentError("连不上云端，检查网络后再试");
+    } finally {
+      els.studentLoginBtn.disabled = false;
+      els.studentLoginBtn.textContent = oldLabel;
+    }
+  }
+
+  function showStudentError(message) {
+    if (!els.studentLoginError) {
+      return;
+    }
+    els.studentLoginError.textContent = message || "";
+    els.studentLoginError.hidden = !message;
+  }
+
+  // 学生端首次登录自动建档
+  function buildNewProfile(name, pass) {
+    const now = new Date().toISOString();
+    return {
+      id: `role_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      pass: pass || "",
+      gender: "male",
+      hp: 0,
+      mp: 0,
+      exp: 0,
+      actionPoints: 10,
+      egg: { granted: true, grantedAt: now, hatched: false, hatchedAt: null },
+      pet: null,
+      pets: [],
+      activePetIndex: 0,
+      inventory: {},
+      balls: {},
+      bondScenes: [],
+      guideCompleted: false,
+      compensationEligible: false,
+      compensationClaimed: false,
+      createdAt: now,
+    };
   }
 
   // 排行榜：显示所有学生，按战力或经验排序
@@ -729,6 +988,12 @@
     els.loginForm = document.getElementById("loginForm");
     els.teacherCode = document.getElementById("teacherCode");
     els.loginError = document.getElementById("loginError");
+    els.loginTabs = document.getElementById("loginView");
+    els.studentLoginForm = document.getElementById("studentLoginForm");
+    els.studentName = document.getElementById("studentName");
+    els.studentPass = document.getElementById("studentPass");
+    els.studentLoginBtn = document.getElementById("studentLoginBtn");
+    els.studentLoginError = document.getElementById("studentLoginError");
     els.rankModal = document.getElementById("rankModal");
     els.rankList = document.getElementById("rankList");
     els.rankClose = document.getElementById("rankClose");
@@ -869,6 +1134,31 @@
 
   function bindEvents() {
     els.loginForm.addEventListener("submit", handleLogin);
+    if (els.studentLoginForm) {
+      els.studentLoginForm.addEventListener("submit", handleStudentLogin);
+    }
+    // 学生 / 老师两个入口来回切
+    const loginModeButtons = document.querySelectorAll("[data-login-mode]");
+    loginModeButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const mode = btn.dataset.loginMode;
+        loginModeButtons.forEach((other) => {
+          other.classList.toggle("is-active", other === btn);
+        });
+        if (els.studentLoginForm) {
+          els.studentLoginForm.hidden = mode !== "student";
+        }
+        if (els.studentLoginError) {
+          els.studentLoginError.hidden = true;
+        }
+        if (els.loginForm) {
+          els.loginForm.hidden = mode !== "teacher";
+        }
+        if (els.loginError) {
+          els.loginError.hidden = true;
+        }
+      });
+    });
     els.navRank?.addEventListener("click", () => showRank("power"));
     els.rankClose?.addEventListener("click", () => { els.rankModal.hidden = true; });
     els.rankTabPower?.addEventListener("click", () => showRank("power"));
@@ -958,7 +1248,7 @@
   function loadState() {
     const fallback = { version: 1, selectedId: null, profiles: [], updatedAt: null };
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(activeStorageKey);
       if (!raw) {
         return fallback;
       }
@@ -1048,6 +1338,7 @@
           ? profile.id
           : `role_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       name: sanitizeName(profile?.name || "未命名角色"),
+      pass: typeof profile?.pass === "string" ? profile.pass : "",
       gender: profile?.gender === "female" ? "female" : "male",
       hp: clampInteger(profile?.hp, 0, Number.MAX_SAFE_INTEGER),
       mp: clampInteger(profile?.mp, 0, Number.MAX_SAFE_INTEGER),
@@ -1183,11 +1474,16 @@
   function saveState(message) {
     state.updatedAt = new Date().toISOString();
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(activeStorageKey, JSON.stringify(state));
       setSaveStatus(message);
     } catch (error) {
       console.error("写入本地存档失败", error);
       setSaveStatus("存档失败");
+    }
+    // 云端模式：本地存完顺手把当前角色推到 Supabase（2 秒内多次改动只发一次）
+    const current = state.profiles.find((profile) => profile.id === state.selectedId);
+    if (current && current.name) {
+      scheduleCloudSync(current);
     }
   }
 
@@ -4189,7 +4485,7 @@
   // 新手引导系统
   // ============================================
   function startGuide() {
-    currentGuideStep = 0;
+    currentGuideStep = guideStartIndex;
     renderGuideStep();
     if (els.guideOverlay) els.guideOverlay.hidden = false;
   }
